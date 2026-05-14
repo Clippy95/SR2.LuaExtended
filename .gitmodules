@@ -1,3 +1,6 @@
 [submodule "SR2.LuaExtended/external/asmjit"]
 	path = SR2.LuaExtended/external/asmjit
 	url = https://github.com/asmjit/asmjit
+[submodule "SR2.LuaExtended/external/asmtk"]
+	path = SR2.LuaExtended/external/asmtk
+	url = https://github.com/asmjit/asmtk
