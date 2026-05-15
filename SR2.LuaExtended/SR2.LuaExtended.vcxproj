@@ -100,6 +100,13 @@
       <EnableUAC>false</EnableUAC>
       <AdditionalLibraryDirectories>$(ProjectDir)external\lib;$(ProjectDir)external\lib\lua;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
+    <PostBuildEvent>
+      <Command>if defined SR2_PATH (
+    if not defined GITHUB_ACTIONS (
+        xcopy /Y /I "$(TargetPath)" "$(SR2_PATH)\scripts" &gt;nul 2&gt;nul
+    )
+)</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
@@ -123,6 +130,13 @@
       <AdditionalLibraryDirectories>$(ProjectDir)external\lib;$(ProjectDir)external\lib\lua;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>if defined SR2_PATH (
+    if not defined GITHUB_ACTIONS (
+        xcopy /Y /I "$(TargetPath)" "$(SR2_PATH)\scripts" &gt;nul 2&gt;nul
+    )
+)</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -141,6 +155,13 @@
       <EnableUAC>false</EnableUAC>
       <AdditionalLibraryDirectories>$(ProjectDir)external\lib;$(ProjectDir)external\lib\lua;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
+    <PostBuildEvent>
+      <Command>if defined SR2_PATH (
+    if not defined GITHUB_ACTIONS (
+        xcopy /Y /I "$(TargetPath)" "$(SR2_PATH)\scripts" &gt;nul 2&gt;nul
+    )
+)</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -161,6 +182,13 @@
       <EnableUAC>false</EnableUAC>
       <AdditionalLibraryDirectories>$(ProjectDir)external\lib;$(ProjectDir)external\lib\lua;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
+    <PostBuildEvent>
+      <Command>if defined SR2_PATH (
+    if not defined GITHUB_ACTIONS (
+        xcopy /Y /I "$(TargetPath)" "$(SR2_PATH)\scripts" &gt;nul 2&gt;nul
+    )
+)</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="external\asmjit\asmjit\a64.h" />

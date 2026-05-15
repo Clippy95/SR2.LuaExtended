@@ -23,6 +23,12 @@
 #pragma comment(lib,"Shlwapi.lib")
 #include <map>
 #include "IniReader.h"
+
+#define lextprint(format, ...) \
+    do { \
+            printf("[LUA Extended] " format, ##__VA_ARGS__); \
+    } while(0)
+
 using namespace Memory::VP;
 static auto HandleDynAddress = GetModuleHandle(nullptr);
 template<typename AT>
@@ -159,7 +165,7 @@ bool CreateCache(const char* DirListFile)
             // Blacklist of file extensions to skip
             if (_stricmp(Extension, ".lua") && _stricmp(Extension, ".cts"))
                 continue;
-            MessageBoxA(0, FileData.cFileName, FileData.cFileName, 0);
+            //MessageBoxA(0, FileData.cFileName, FileData.cFileName, 0);
             std::string SearchFileName(FileData.cFileName);
             SearchFileName = StringToLower(SearchFileName);
             std::map<std::string, FILEDATA>::iterator itDirCache;
@@ -2244,8 +2250,55 @@ namespace LuaExtended
     //            };
     //    }
     //}LUAX;
+
+    static bool HasConsole()
+    {
+        if (GetConsoleWindow() != nullptr)
+            return true;
+
+        HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (out == nullptr || out == INVALID_HANDLE_VALUE)
+            return false;
+
+        DWORD mode = 0;
+        return GetConsoleMode(out, &mode) != 0;
+    }
+
+    void OpenConsoleSafe()
+    {
+        static bool initialized = false;
+        if (initialized)
+            return;
+
+        initialized = true;
+
+        bool already_has_console = HasConsole();
+
+        if (!already_has_console)
+        {
+            if (!AllocConsole())
+            {
+                if (GetLastError() != ERROR_ACCESS_DENIED)
+                    return;
+            }
+
+            FILE* fp = nullptr;
+            freopen_s(&fp, "CONOUT$", "w", stdout);
+            freopen_s(&fp, "CONOUT$", "w", stderr);
+            freopen_s(&fp, "CONIN$", "r", stdin);
+
+            setvbuf(stdout, nullptr, _IONBF, 0);
+            setvbuf(stderr, nullptr, _IONBF, 0);
+
+            std::ios::sync_with_stdio(true);
+        }
+
+        lextprint("Oh, Hi Mark\n");
+    }
+
     void Attach()
     {
+        OpenConsoleSafe();
         CIniReader ini;
         auto FileToParse = ini.ReadString("MAIN", "FileToParse", "loose.txt");
         CreateCache(FileToParse.c_str());
@@ -2255,6 +2308,7 @@ namespace LuaExtended
 
     }
 }
+
 
 
 BOOL APIENTRY DllMain( HMODULE hModule,
