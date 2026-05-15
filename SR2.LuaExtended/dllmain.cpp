@@ -253,10 +253,18 @@ struct luaL_Reg
 struct AssemblyHookBlock
 {
     std::string name;
+    enum class Mode
+    {
+        Standalone,
+        CodecaveJmp,
+    };
+
+    Mode mode{ Mode::Standalone };
     uintptr_t hook_address{};
     std::string label;
     std::string body;
 
+    uintptr_t compiled_address{};
     uintptr_t codecave_address{};
     uintptr_t return_address{};
 
@@ -322,6 +330,7 @@ static bool ParseCodecaveHeader(const std::string& line, AssemblyHookBlock& out)
     if (!label_text.empty() && label_text.back() == ':')
         label_text.pop_back();
 
+    out.mode = AssemblyHookBlock::Mode::CodecaveJmp;
     out.hook_address = std::stoul(address_text, nullptr, 0);
     out.label = label_text;
 
@@ -335,8 +344,7 @@ static bool ParseAssemblyScript(const char* name, const char* script, AssemblyHo
 
     std::istringstream stream(script ? script : "");
     std::string line;
-
-    bool in_block = false;
+    std::vector<std::string> lines;
 
     while (std::getline(stream, line))
     {
@@ -345,25 +353,38 @@ static bool ParseAssemblyScript(const char* name, const char* script, AssemblyHo
         if (line.empty())
             continue;
 
-        if (!in_block)
-        {
-            if (ParseCodecaveHeader(line, out))
-            {
-                in_block = true;
-                continue;
-            }
-        }
-        else
-        {
-            if (line.find("%end%") != std::string::npos)
-                break;
+        lines.push_back(line);
+    }
 
-            out.body += line;
-            out.body += "\n";
+    for (size_t i = 0; i < lines.size(); ++i)
+    {
+        if (ParseCodecaveHeader(lines[i], out))
+        {
+            for (size_t j = i + 1; j < lines.size(); ++j)
+            {
+                if (lines[j].find("%end%") != std::string::npos)
+                    break;
+
+                out.body += lines[j];
+                out.body += "\n";
+            }
+
+            return out.hook_address != 0 && !out.body.empty();
         }
     }
 
-    return out.hook_address != 0 && !out.body.empty();
+    out.mode = AssemblyHookBlock::Mode::Standalone;
+
+    for (const auto& trimmed_line : lines)
+    {
+        if (trimmed_line.find("%end%") != std::string::npos)
+            break;
+
+        out.body += trimmed_line;
+        out.body += "\n";
+    }
+
+    return !out.body.empty();
 }
 
 static bool AssembleX86Text(
@@ -1209,7 +1230,128 @@ static void* AllocateCodeCaveFromPool(size_t used_size, size_t alignment = 16)
     return mem;
 }
 
-static bool CompileAssemblyBlock(AssemblyHookBlock& block)
+static void* AllocateExecutableMemory(size_t used_size, size_t& out_alloc_size)
+{
+    out_alloc_size = 0;
+
+    if (used_size == 0)
+        return nullptr;
+
+    size_t page_size = GetPageSize();
+    out_alloc_size = AlignUp(max(used_size, page_size), page_size);
+
+    return VirtualAlloc(
+        nullptr,
+        out_alloc_size,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE
+    );
+}
+
+static bool CompileStandaloneAssemblyBlock(AssemblyHookBlock& block)
+{
+    constexpr uintptr_t TEMP_BASE = 0x50000000;
+
+    std::string body = PreprocessGameAddressTokens(block.body);
+    std::vector<uint8_t> temp_bytes;
+
+    if (!AssembleX86Text(
+        body,
+        static_cast<uint32_t>(TEMP_BASE),
+        temp_bytes
+    ))
+    {
+        return false;
+    }
+
+    size_t estimated_size = temp_bytes.size();
+    if (estimated_size == 0)
+    {
+        lextprint("CompileAssembly: estimated size was zero\n");
+        return false;
+    }
+
+    size_t alloc_size = 0;
+    void* mem = AllocateExecutableMemory(estimated_size, alloc_size);
+    if (!mem)
+    {
+        lextprint("CompileAssembly: VirtualAlloc failed\n");
+        return false;
+    }
+
+    block.compiled_address = reinterpret_cast<uintptr_t>(mem);
+
+    std::vector<uint8_t> final_bytes;
+    if (!AssembleX86Text(
+        body,
+        static_cast<uint32_t>(block.compiled_address),
+        final_bytes
+    ))
+    {
+        VirtualFree(mem, 0, MEM_RELEASE);
+        return false;
+    }
+
+    if (final_bytes.empty())
+    {
+        VirtualFree(mem, 0, MEM_RELEASE);
+        return false;
+    }
+
+    if (final_bytes.size() > estimated_size)
+    {
+        VirtualFree(mem, 0, MEM_RELEASE);
+
+        estimated_size = final_bytes.size();
+        mem = AllocateExecutableMemory(estimated_size, alloc_size);
+        if (!mem)
+        {
+            lextprint("CompileAssembly: VirtualAlloc failed\n");
+            return false;
+        }
+
+        block.compiled_address = reinterpret_cast<uintptr_t>(mem);
+
+        final_bytes.clear();
+        if (!AssembleX86Text(
+            body,
+            static_cast<uint32_t>(block.compiled_address),
+            final_bytes
+        ))
+        {
+            VirtualFree(mem, 0, MEM_RELEASE);
+            return false;
+        }
+
+        if (final_bytes.empty())
+        {
+            VirtualFree(mem, 0, MEM_RELEASE);
+            return false;
+        }
+    }
+
+    memcpy(mem, final_bytes.data(), final_bytes.size());
+
+    FlushInstructionCache(
+        GetCurrentProcess(),
+        mem,
+        final_bytes.size()
+    );
+
+    block.final_bytes = std::move(final_bytes);
+
+    lextprint(
+        "CompileAssembly: %s assembled at 0x%llX used=%zu alloc=%zu\n",
+        block.name.c_str(),
+        static_cast<unsigned long long>(block.compiled_address),
+        block.final_bytes.size(),
+        alloc_size
+    );
+
+    return true;
+}
+
+static bool CompileCodecaveAssemblyBlock(AssemblyHookBlock& block)
 {
     constexpr size_t JMP_SIZE = 5;
 
@@ -1323,6 +1465,7 @@ static bool CompileAssemblyBlock(AssemblyHookBlock& block)
     }
 
     block.codecave_address = reinterpret_cast<uintptr_t>(cave);
+    block.compiled_address = block.codecave_address;
 
     /*
         Second pass:
@@ -1411,6 +1554,7 @@ static bool CompileAssemblyBlock(AssemblyHookBlock& block)
             return false;
 
         block.codecave_address = reinterpret_cast<uintptr_t>(cave);
+        block.compiled_address = block.codecave_address;
 
         // Re-run second pass with new real address.
         pre_bytes.clear();
@@ -1507,17 +1651,38 @@ static bool CompileAssemblyBlock(AssemblyHookBlock& block)
     return true;
 }
 
-static bool CompileAssemblyScript(const char* name, const char* script)
+static bool CompileAssemblyBlock(AssemblyHookBlock& block, uintptr_t& out_address)
+{
+    if (block.mode == AssemblyHookBlock::Mode::CodecaveJmp)
+    {
+        if (!CompileCodecaveAssemblyBlock(block))
+            return false;
+    }
+    else
+    {
+        if (!CompileStandaloneAssemblyBlock(block))
+            return false;
+    }
+
+    out_address = block.compiled_address;
+    return out_address != 0;
+}
+
+static uintptr_t CompileAssemblyScript(const char* name, const char* script)
 {
     AssemblyHookBlock block;
 
     if (!ParseAssemblyScript(name, script, block))
     {
         lextprint("CompileAssembly: parse failed\n");
-        return false;
+        return 0;
     }
 
-    return CompileAssemblyBlock(block);
+    uintptr_t compiled_address = 0;
+    if (!CompileAssemblyBlock(block, compiled_address))
+        return 0;
+
+    return compiled_address;
 }
 
 namespace LuaExtended
@@ -1990,10 +2155,10 @@ namespace LuaExtended
         const char* name = args.get<const char*>();
         const char* asm_text = args.get<const char*>();
 
-        bool ok = CompileAssemblyScript(name, asm_text);
+        uintptr_t compiled_address = CompileAssemblyScript(name, asm_text);
 
         LuaReturns ret(L);
-        ret.push(ok);
+        ret.push(compiled_address);
         return ret.count();
     }
 
