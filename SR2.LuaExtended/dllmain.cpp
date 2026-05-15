@@ -1167,14 +1167,23 @@ static std::string PreprocessCommon(const std::string& input, const AssemblyHook
     return out;
 }
 
-struct CodeCavePage
+struct ExecutablePage
 {
     uint8_t* base{};
     size_t size{};
     size_t used{};
 };
 
-static std::vector<CodeCavePage> g_CodeCavePages;
+struct ExecutableAllocation
+{
+    uint8_t* ptr{};
+    size_t page_index{};
+    size_t previous_used{};
+    size_t end_used{};
+    size_t reserved_size{};
+};
+
+static std::vector<ExecutablePage> g_ExecutablePages;
 
 static size_t AlignUp(size_t value, size_t alignment)
 {
@@ -1188,22 +1197,29 @@ static size_t GetPageSize()
     return si.dwPageSize;
 }
 
-static void* AllocateCodeCaveFromPool(size_t used_size, size_t alignment = 16)
+static ExecutableAllocation AllocateExecutableFromPool(size_t used_size, size_t alignment = 16)
 {
+    ExecutableAllocation allocation{};
+
     if (used_size == 0)
-        return nullptr;
+        return allocation;
 
     used_size = AlignUp(used_size, alignment);
 
-    for (auto& page : g_CodeCavePages)
+    for (size_t i = 0; i < g_ExecutablePages.size(); ++i)
     {
+        auto& page = g_ExecutablePages[i];
         size_t aligned_used = AlignUp(page.used, alignment);
 
         if (aligned_used + used_size <= page.size)
         {
-            void* result = page.base + aligned_used;
-            page.used = aligned_used + used_size;
-            return result;
+            allocation.ptr = page.base + aligned_used;
+            allocation.page_index = i;
+            allocation.previous_used = page.used;
+            allocation.end_used = aligned_used + used_size;
+            allocation.reserved_size = page.size;
+            page.used = allocation.end_used;
+            return allocation;
         }
     }
 
@@ -1218,34 +1234,31 @@ static void* AllocateCodeCaveFromPool(size_t used_size, size_t alignment = 16)
     );
 
     if (!mem)
-        return nullptr;
+        return allocation;
 
-    CodeCavePage page{};
+    ExecutablePage page{};
     page.base = static_cast<uint8_t*>(mem);
     page.size = alloc_size;
     page.used = used_size;
 
-    g_CodeCavePages.push_back(page);
+    g_ExecutablePages.push_back(page);
 
-    return mem;
+    allocation.ptr = page.base;
+    allocation.page_index = g_ExecutablePages.size() - 1;
+    allocation.previous_used = 0;
+    allocation.end_used = used_size;
+    allocation.reserved_size = alloc_size;
+    return allocation;
 }
 
-static void* AllocateExecutableMemory(size_t used_size, size_t& out_alloc_size)
+static void RollbackExecutableAllocation(const ExecutableAllocation& allocation)
 {
-    out_alloc_size = 0;
+    if (!allocation.ptr || allocation.page_index >= g_ExecutablePages.size())
+        return;
 
-    if (used_size == 0)
-        return nullptr;
-
-    size_t page_size = GetPageSize();
-    out_alloc_size = AlignUp(max(used_size, page_size), page_size);
-
-    return VirtualAlloc(
-        nullptr,
-        out_alloc_size,
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_EXECUTE_READWRITE
-    );
+    auto& page = g_ExecutablePages[allocation.page_index];
+    if (page.used == allocation.end_used)
+        page.used = allocation.previous_used;
 }
 
 static bool CompileStandaloneAssemblyBlock(AssemblyHookBlock& block)
@@ -1271,15 +1284,14 @@ static bool CompileStandaloneAssemblyBlock(AssemblyHookBlock& block)
         return false;
     }
 
-    size_t alloc_size = 0;
-    void* mem = AllocateExecutableMemory(estimated_size, alloc_size);
-    if (!mem)
+    ExecutableAllocation allocation = AllocateExecutableFromPool(estimated_size);
+    if (!allocation.ptr)
     {
-        lextprint("CompileAssembly: VirtualAlloc failed\n");
+        lextprint("CompileAssembly: executable pool allocation failed\n");
         return false;
     }
 
-    block.compiled_address = reinterpret_cast<uintptr_t>(mem);
+    block.compiled_address = reinterpret_cast<uintptr_t>(allocation.ptr);
 
     std::vector<uint8_t> final_bytes;
     if (!AssembleX86Text(
@@ -1288,29 +1300,29 @@ static bool CompileStandaloneAssemblyBlock(AssemblyHookBlock& block)
         final_bytes
     ))
     {
-        VirtualFree(mem, 0, MEM_RELEASE);
+        RollbackExecutableAllocation(allocation);
         return false;
     }
 
     if (final_bytes.empty())
     {
-        VirtualFree(mem, 0, MEM_RELEASE);
+        RollbackExecutableAllocation(allocation);
         return false;
     }
 
     if (final_bytes.size() > estimated_size)
     {
-        VirtualFree(mem, 0, MEM_RELEASE);
+        RollbackExecutableAllocation(allocation);
 
         estimated_size = final_bytes.size();
-        mem = AllocateExecutableMemory(estimated_size, alloc_size);
-        if (!mem)
+        allocation = AllocateExecutableFromPool(estimated_size);
+        if (!allocation.ptr)
         {
-            lextprint("CompileAssembly: VirtualAlloc failed\n");
+            lextprint("CompileAssembly: executable pool allocation failed\n");
             return false;
         }
 
-        block.compiled_address = reinterpret_cast<uintptr_t>(mem);
+        block.compiled_address = reinterpret_cast<uintptr_t>(allocation.ptr);
 
         final_bytes.clear();
         if (!AssembleX86Text(
@@ -1319,22 +1331,22 @@ static bool CompileStandaloneAssemblyBlock(AssemblyHookBlock& block)
             final_bytes
         ))
         {
-            VirtualFree(mem, 0, MEM_RELEASE);
+            RollbackExecutableAllocation(allocation);
             return false;
         }
 
         if (final_bytes.empty())
         {
-            VirtualFree(mem, 0, MEM_RELEASE);
+            RollbackExecutableAllocation(allocation);
             return false;
         }
     }
 
-    memcpy(mem, final_bytes.data(), final_bytes.size());
+    memcpy(allocation.ptr, final_bytes.data(), final_bytes.size());
 
     FlushInstructionCache(
         GetCurrentProcess(),
-        mem,
+        allocation.ptr,
         final_bytes.size()
     );
 
@@ -1345,7 +1357,7 @@ static bool CompileStandaloneAssemblyBlock(AssemblyHookBlock& block)
         block.name.c_str(),
         static_cast<unsigned long long>(block.compiled_address),
         block.final_bytes.size(),
-        alloc_size
+        allocation.reserved_size
     );
 
     return true;
@@ -1449,22 +1461,14 @@ static bool CompileCodecaveAssemblyBlock(AssemblyHookBlock& block)
         Allocate based on actual used size.
         VirtualAlloc will still round internally to a page, but our hook tracks exact used size.
     */
-    size_t alloc_size = 0;
-    void* cave = AllocateCodeCaveFromPool(estimated_size);
-
-    if (!cave)
+    ExecutableAllocation allocation = AllocateExecutableFromPool(estimated_size);
+    if (!allocation.ptr)
     {
         lextprint("CompileAssembly: codecave pool allocation failed\n");
         return false;
     }
 
-    if (!cave)
-    {
-        lextprint("CompileAssembly: VirtualAlloc failed\n");
-        return false;
-    }
-
-    block.codecave_address = reinterpret_cast<uintptr_t>(cave);
+    block.codecave_address = reinterpret_cast<uintptr_t>(allocation.ptr);
     block.compiled_address = block.codecave_address;
 
     /*
@@ -1479,7 +1483,7 @@ static bool CompileCodecaveAssemblyBlock(AssemblyHookBlock& block)
         pre_bytes
     ))
     {
-        VirtualFree(cave, 0, MEM_RELEASE);
+        RollbackExecutableAllocation(allocation);
         return false;
     }
 
@@ -1497,7 +1501,7 @@ static bool CompileCodecaveAssemblyBlock(AssemblyHookBlock& block)
             block.relocated_original
         ))
         {
-            VirtualFree(cave, 0, MEM_RELEASE);
+            RollbackExecutableAllocation(allocation);
             return false;
         }
     }
@@ -1517,7 +1521,7 @@ static bool CompileCodecaveAssemblyBlock(AssemblyHookBlock& block)
             post_bytes
         ))
         {
-            VirtualFree(cave, 0, MEM_RELEASE);
+            RollbackExecutableAllocation(allocation);
             return false;
         }
     }
@@ -1529,7 +1533,7 @@ static bool CompileCodecaveAssemblyBlock(AssemblyHookBlock& block)
 
     if (block.final_bytes.empty())
     {
-        VirtualFree(cave, 0, MEM_RELEASE);
+        RollbackExecutableAllocation(allocation);
         return false;
     }
 
@@ -1539,21 +1543,17 @@ static bool CompileCodecaveAssemblyBlock(AssemblyHookBlock& block)
     */
     if (block.final_bytes.size() > estimated_size)
     {
-        VirtualFree(cave, 0, MEM_RELEASE);
+        RollbackExecutableAllocation(allocation);
 
         estimated_size = block.final_bytes.size();
-        cave = AllocateCodeCaveFromPool(estimated_size);
-
-        if (!cave)
+        allocation = AllocateExecutableFromPool(estimated_size);
+        if (!allocation.ptr)
         {
             lextprint("CompileAssembly: codecave pool allocation failed\n");
             return false;
         }
 
-        if (!cave)
-            return false;
-
-        block.codecave_address = reinterpret_cast<uintptr_t>(cave);
+        block.codecave_address = reinterpret_cast<uintptr_t>(allocation.ptr);
         block.compiled_address = block.codecave_address;
 
         // Re-run second pass with new real address.
@@ -1568,7 +1568,7 @@ static bool CompileCodecaveAssemblyBlock(AssemblyHookBlock& block)
             pre_bytes
         ))
         {
-            VirtualFree(cave, 0, MEM_RELEASE);
+            RollbackExecutableAllocation(allocation);
             return false;
         }
 
@@ -1583,7 +1583,7 @@ static bool CompileCodecaveAssemblyBlock(AssemblyHookBlock& block)
                 block.relocated_original
             ))
             {
-                VirtualFree(cave, 0, MEM_RELEASE);
+                RollbackExecutableAllocation(allocation);
                 return false;
             }
         }
@@ -1601,7 +1601,7 @@ static bool CompileCodecaveAssemblyBlock(AssemblyHookBlock& block)
                 post_bytes
             ))
             {
-                VirtualFree(cave, 0, MEM_RELEASE);
+                RollbackExecutableAllocation(allocation);
                 return false;
             }
         }
@@ -1611,11 +1611,11 @@ static bool CompileCodecaveAssemblyBlock(AssemblyHookBlock& block)
         block.final_bytes.insert(block.final_bytes.end(), post_bytes.begin(), post_bytes.end());
     }
 
-    memcpy(cave, block.final_bytes.data(), block.final_bytes.size());
+    memcpy(allocation.ptr, block.final_bytes.data(), block.final_bytes.size());
 
     FlushInstructionCache(
         GetCurrentProcess(),
-        cave,
+        allocation.ptr,
         block.final_bytes.size()
     );
 
@@ -1626,7 +1626,7 @@ static bool CompileCodecaveAssemblyBlock(AssemblyHookBlock& block)
     ))
     {
         lextprint("CompileAssembly: failed to write JMP\n");
-        VirtualFree(cave, 0, MEM_RELEASE);
+        RollbackExecutableAllocation(allocation);
         return false;
     }
 
@@ -1645,7 +1645,7 @@ static bool CompileCodecaveAssemblyBlock(AssemblyHookBlock& block)
         static_cast<unsigned long long>(block.codecave_address),
         block.stolen_size,
         block.final_bytes.size(),
-        alloc_size
+        allocation.reserved_size
     );
 
     return true;
