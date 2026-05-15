@@ -23,7 +23,7 @@
 #pragma comment(lib,"Shlwapi.lib")
 #include <map>
 #include "IniReader.h"
-
+#include "ankerl/unordered_dense.h"
 #define lextprint(format, ...) \
     do { \
             printf("[LUA Extended] " format, ##__VA_ARGS__); \
@@ -160,14 +160,14 @@ bool CreateCache(const char* DirListFile)
             if (!strcmp(FileData.cFileName, ".") || !strcmp(FileData.cFileName, "..") || (FileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
                 continue;
 
-            char* Extension = PathFindExtensionA(FileData.cFileName);
-
-            // Blacklist of file extensions to skip
-            if (_stricmp(Extension, ".lua") && _stricmp(Extension, ".cts"))
-                continue;
-            //MessageBoxA(0, FileData.cFileName, FileData.cFileName, 0);
             std::string SearchFileName(FileData.cFileName);
             SearchFileName = StringToLower(SearchFileName);
+            auto filenamev = std::string_view(SearchFileName);
+            if (!filenamev.ends_with("_gs.lua") &&
+                !filenamev.ends_with("_ui.lua") &&
+                !filenamev.ends_with(".cts"))
+                continue;
+            //MessageBoxA(0, FileData.cFileName, FileData.cFileName, 0);
             std::map<std::string, FILEDATA>::iterator itDirCache;
 
             itDirCache = DirCache.find(SearchFileName);
@@ -1119,6 +1119,11 @@ static bool WriteRelativeJump(uintptr_t src, uintptr_t dst, size_t patch_size)
     return true;
 }
 
+namespace LuaExtended
+{
+    uintptr_t ResolveNamedAllocationAddress(std::string_view block_name, std::string_view var_name);
+}
+
 static std::string PreprocessGameAddressTokens(const std::string& input)
 {
     std::string output;
@@ -1158,12 +1163,63 @@ static std::string PreprocessGameAddressTokens(const std::string& input)
     return output;
 }
 
+static std::string PreprocessAllocationTokens(const std::string& input)
+{
+    std::string output;
+    output.reserve(input.size());
+
+    static const std::regex allocation_regex(
+        R"(\(allocation\)([A-Za-z_][A-Za-z0-9_]*)->([A-Za-z_][A-Za-z0-9_]*))"
+    );
+
+    std::sregex_iterator it(input.begin(), input.end(), allocation_regex);
+    std::sregex_iterator end;
+
+    size_t last_pos = 0;
+
+    for (; it != end; ++it)
+    {
+        const std::smatch& match = *it;
+
+        output.append(input, last_pos, match.position() - last_pos);
+
+        std::string block_name = match[1].str();
+        std::string var_name = match[2].str();
+
+        uintptr_t final_address = LuaExtended::ResolveNamedAllocationAddress(
+            block_name,
+            var_name
+        );
+
+        if (final_address == 0)
+        {
+            lextprint(
+                "CompileAssembly: unresolved allocation token %s->%s\n",
+                block_name.c_str(),
+                var_name.c_str()
+            );
+
+            output += match.str();
+        }
+        else
+        {
+            output += HexAddress(final_address);
+        }
+
+        last_pos = match.position() + match.length();
+    }
+
+    output.append(input, last_pos, std::string::npos);
+    return output;
+}
+
 static std::string PreprocessCommon(const std::string& input, const AssemblyHookBlock& block)
 {
     std::string out = input;
 
     ReplaceAll(out, "%returnaddress%", HexAddress(block.return_address));
     out = PreprocessGameAddressTokens(out);
+    out = PreprocessAllocationTokens(out);
     return out;
 }
 
@@ -1266,6 +1322,7 @@ static bool CompileStandaloneAssemblyBlock(AssemblyHookBlock& block)
     constexpr uintptr_t TEMP_BASE = 0x50000000;
 
     std::string body = PreprocessGameAddressTokens(block.body);
+    body = PreprocessAllocationTokens(body);
     std::vector<uint8_t> temp_bytes;
 
     if (!AssembleX86Text(
@@ -1361,6 +1418,11 @@ static bool CompileStandaloneAssemblyBlock(AssemblyHookBlock& block)
     );
 
     return true;
+}
+
+namespace LuaExtended
+{
+    uintptr_t ResolveNamedAllocationAddress(std::string_view block_name, std::string_view var_name);
 }
 
 static bool CompileCodecaveAssemblyBlock(AssemblyHookBlock& block)
@@ -2013,7 +2075,7 @@ namespace LuaExtended
     }
 
     uintptr_t luaL_openlib_retail = 0xCD9A30_g;
-    void* luaL_openlib(lua_State* L, luaL_Reg* reg, const char* eh)
+    void* luaL_openlib(lua_State* L, luaL_Reg* reg, const char* eh = "_G")
     {
         __asm
         {
@@ -2059,6 +2121,584 @@ namespace LuaExtended
 
         return {};
     }
+
+    struct MemoryVar
+    {
+        enum class Type
+        {
+            Int,
+            Int8,
+            UInt8,
+            Int16,
+            UInt16,
+            Int32,
+            UInt32,
+            Float,
+            Double,
+        };
+
+        std::string name;
+        Type type{};
+        size_t offset{};
+
+        union
+        {
+            int32_t i;
+            int8_t i8;
+            uint8_t u8;
+            int16_t i16;
+            uint16_t u16;
+            int32_t i32;
+            uint32_t u32;
+            float f;
+            double d;
+        } value{};
+    };
+
+    struct MemoryBlock
+    {
+        std::string name;
+        size_t requested_size{};
+        size_t current_offset{};
+        size_t allocated_size{};
+        void* allocated_memory{};
+        bool persistent{};
+        std::vector<MemoryVar> vars;
+    };
+
+    static std::unordered_map<std::string, MemoryBlock*> g_RegisteredMemoryBlocks;
+    static int g_NextMemoryHandle = 1;
+    static std::unordered_map<int, MemoryBlock*> g_MemoryBlocksByHandle;
+    static std::unordered_map<MemoryBlock*, int> g_MemoryHandlesByBlock;
+    static std::unordered_map<std::string, int> g_MemoryHandlesByName;
+
+    static int luaext_errorf(lua_State* L, const char* fmt, ...)
+    {
+        va_list args;
+        va_start(args, fmt);
+        lua_pushvfstring(L, fmt, args);
+        va_end(args);
+        return lua_error(L);
+    }
+
+    static const char* luaext_checkstring(lua_State* L, int index)
+    {
+        const char* value = lua_tostring(L, index);
+        if (!value)
+            luaext_errorf(L, "bad argument #%d (string expected)", index);
+        return value;
+    }
+
+    static lua_Number luaext_checknumber(lua_State* L, int index)
+    {
+        if (!lua_isnumber(L, index))
+            luaext_errorf(L, "bad argument #%d (number expected)", index);
+        return lua_tonumber(L, index);
+    }
+
+    static int luaext_checkint(lua_State* L, int index)
+    {
+        return static_cast<int>(luaext_checknumber(L, index));
+    }
+
+    static void luaext_argcheck(lua_State* L, bool condition, int index, const char* message)
+    {
+        if (!condition)
+            luaext_errorf(L, "bad argument #%d (%s)", index, message);
+    }
+
+    static uintptr_t get_memory_block_address(const MemoryBlock* block)
+    {
+        return block && block->allocated_memory
+            ? reinterpret_cast<uintptr_t>(block->allocated_memory)
+            : 0;
+    }
+
+    uintptr_t ResolveNamedAllocationAddress(std::string_view block_name, std::string_view var_name)
+    {
+        auto it = g_RegisteredMemoryBlocks.find(std::string(block_name));
+        if (it == g_RegisteredMemoryBlocks.end() || !it->second || !it->second->allocated_memory)
+            return 0;
+
+        MemoryBlock* block = it->second;
+        for (const auto& var : block->vars)
+        {
+            if (var.name == var_name)
+            {
+                return reinterpret_cast<uintptr_t>(block->allocated_memory) + var.offset;
+            }
+        }
+
+        return 0;
+    }
+
+    static size_t find_memory_var_index(const MemoryBlock* block, std::string_view name)
+    {
+        if (!block)
+            return static_cast<size_t>(-1);
+
+        for (size_t i = 0; i < block->vars.size(); ++i)
+        {
+            if (block->vars[i].name == name)
+                return i;
+        }
+
+        return static_cast<size_t>(-1);
+    }
+
+    static int ensure_memory_block_handle(MemoryBlock* block)
+    {
+        if (!block)
+            return 0;
+
+        if (auto it = g_MemoryHandlesByBlock.find(block); it != g_MemoryHandlesByBlock.end())
+            return it->second;
+
+        int handle = g_NextMemoryHandle++;
+        g_MemoryBlocksByHandle[handle] = block;
+        g_MemoryHandlesByBlock[block] = handle;
+        if (!block->name.empty())
+            g_MemoryHandlesByName[block->name] = handle;
+        return handle;
+    }
+
+    static MemoryBlock* get_memory_block_by_handle(lua_State* L, int index)
+    {
+        int handle = luaext_checkint(L, index);
+        auto it = g_MemoryBlocksByHandle.find(handle);
+        if (it == g_MemoryBlocksByHandle.end() || !it->second)
+            luaext_errorf(L, "invalid memory handle");
+        return it->second;
+    }
+
+    static size_t get_memory_var_alignment(MemoryVar::Type type)
+    {
+        switch (type)
+        {
+        case MemoryVar::Type::Int:
+        case MemoryVar::Type::Int32:
+            return alignof(int32_t);
+
+        case MemoryVar::Type::Int8:
+            return alignof(int8_t);
+
+        case MemoryVar::Type::UInt8:
+            return alignof(uint8_t);
+
+        case MemoryVar::Type::Int16:
+            return alignof(int16_t);
+
+        case MemoryVar::Type::UInt16:
+            return alignof(uint16_t);
+
+        case MemoryVar::Type::UInt32:
+            return alignof(uint32_t);
+
+        case MemoryVar::Type::Float:
+            return alignof(float);
+
+        case MemoryVar::Type::Double:
+            return alignof(double);
+        }
+
+        return 1;
+    }
+
+    static size_t get_memory_var_size(MemoryVar::Type type)
+    {
+        switch (type)
+        {
+        case MemoryVar::Type::Int:
+        case MemoryVar::Type::Int32:
+            return sizeof(int32_t);
+
+        case MemoryVar::Type::Int8:
+            return sizeof(int8_t);
+
+        case MemoryVar::Type::UInt8:
+            return sizeof(uint8_t);
+
+        case MemoryVar::Type::Int16:
+            return sizeof(int16_t);
+
+        case MemoryVar::Type::UInt16:
+            return sizeof(uint16_t);
+
+        case MemoryVar::Type::UInt32:
+            return sizeof(uint32_t);
+
+        case MemoryVar::Type::Float:
+            return sizeof(float);
+
+        case MemoryVar::Type::Double:
+            return sizeof(double);
+        }
+
+        return 0;
+    }
+
+    static void write_memory_var_value(const MemoryBlock& block, const MemoryVar& var)
+    {
+        if (!block.allocated_memory)
+            return;
+
+        uint8_t* dst = static_cast<uint8_t*>(block.allocated_memory) + var.offset;
+
+        switch (var.type)
+        {
+        case MemoryVar::Type::Int:
+            *reinterpret_cast<int32_t*>(dst) = var.value.i;
+            break;
+
+        case MemoryVar::Type::Int8:
+            *reinterpret_cast<int8_t*>(dst) = var.value.i8;
+            break;
+
+        case MemoryVar::Type::UInt8:
+            *reinterpret_cast<uint8_t*>(dst) = var.value.u8;
+            break;
+
+        case MemoryVar::Type::Int16:
+            *reinterpret_cast<int16_t*>(dst) = var.value.i16;
+            break;
+
+        case MemoryVar::Type::UInt16:
+            *reinterpret_cast<uint16_t*>(dst) = var.value.u16;
+            break;
+
+        case MemoryVar::Type::Int32:
+            *reinterpret_cast<int32_t*>(dst) = var.value.i32;
+            break;
+
+        case MemoryVar::Type::UInt32:
+            *reinterpret_cast<uint32_t*>(dst) = var.value.u32;
+            break;
+
+        case MemoryVar::Type::Float:
+            *reinterpret_cast<float*>(dst) = var.value.f;
+            break;
+
+        case MemoryVar::Type::Double:
+            *reinterpret_cast<double*>(dst) = var.value.d;
+            break;
+        }
+    }
+
+    static size_t add_memory_var(MemoryBlock* block, const char* name, MemoryVar::Type type)
+    {
+        if (!block || !name)
+            return static_cast<size_t>(-1);
+
+        if (find_memory_var_index(block, name) != static_cast<size_t>(-1))
+            return static_cast<size_t>(-1);
+
+        MemoryVar var{};
+        var.name = name;
+        var.type = type;
+        var.offset = AlignUp(
+            block->current_offset,
+            get_memory_var_alignment(type)
+        );
+
+        block->current_offset = var.offset;
+
+        switch (type)
+        {
+        case MemoryVar::Type::Int:
+            var.value.i = 0;
+            break;
+
+        case MemoryVar::Type::Int8:
+            var.value.i8 = 0;
+            break;
+
+        case MemoryVar::Type::UInt8:
+            var.value.u8 = 0;
+            break;
+
+        case MemoryVar::Type::Int16:
+            var.value.i16 = 0;
+            break;
+
+        case MemoryVar::Type::UInt16:
+            var.value.u16 = 0;
+            break;
+
+        case MemoryVar::Type::Int32:
+            var.value.i32 = 0;
+            break;
+
+        case MemoryVar::Type::UInt32:
+            var.value.u32 = 0;
+            break;
+
+        case MemoryVar::Type::Float:
+            var.value.f = 0.0f;
+            break;
+
+        case MemoryVar::Type::Double:
+            var.value.d = 0.0;
+            break;
+        }
+
+        block->current_offset += get_memory_var_size(type);
+        block->vars.push_back(std::move(var));
+        return block->vars.size() - 1;
+    }
+
+    static int Lua_MemoryCreateFn(lua_State* L)
+    {
+        const char* name = luaext_checkstring(L, 1);
+        int requested_size = luaext_checkint(L, 2);
+
+        luaext_argcheck(L, requested_size >= 0, 2, "size must be non-negative");
+
+        if (auto existing = g_MemoryHandlesByName.find(name); existing != g_MemoryHandlesByName.end())
+        {
+            lua_pushnumber(L, static_cast<lua_Number>(existing->second));
+            return 1;
+        }
+
+        if (auto registered = g_RegisteredMemoryBlocks.find(name); registered != g_RegisteredMemoryBlocks.end() && registered->second)
+        {
+            int handle = ensure_memory_block_handle(registered->second);
+            lua_pushnumber(L, static_cast<lua_Number>(handle));
+            return 1;
+        }
+
+        auto block = new MemoryBlock();
+        block->name = name ? name : "MemoryBlock";
+        block->requested_size = static_cast<size_t>(requested_size);
+
+        int handle = ensure_memory_block_handle(block);
+        lua_pushnumber(L, static_cast<lua_Number>(handle));
+        return 1;
+    }
+
+    static int Lua_MemoryFindFn(lua_State* L)
+    {
+        const char* name = luaext_checkstring(L, 1);
+
+        if (auto existing = g_MemoryHandlesByName.find(name); existing != g_MemoryHandlesByName.end())
+        {
+            lua_pushnumber(L, static_cast<lua_Number>(existing->second));
+            return 1;
+        }
+
+        auto it = g_RegisteredMemoryBlocks.find(name);
+        if (it == g_RegisteredMemoryBlocks.end() || !it->second)
+        {
+            lua_pushnil(L);
+            return 1;
+        }
+
+        int handle = ensure_memory_block_handle(it->second);
+        lua_pushnumber(L, static_cast<lua_Number>(handle));
+        return 1;
+    }
+
+    static int Lua_MemoryPushVarFn(lua_State* L, MemoryVar::Type type)
+    {
+        auto block = get_memory_block_by_handle(L, 1);
+        const char* name = luaext_checkstring(L, 2);
+
+        if (block->allocated_memory)
+            return luaext_errorf(L, "cannot add variables after Allocate");
+
+        size_t index = add_memory_var(block, name, type);
+        if (index == static_cast<size_t>(-1))
+            return luaext_errorf(L, "variable '%s' already exists", name);
+
+        lua_pushnumber(L, static_cast<lua_Number>(block->vars[index].offset));
+        return 1;
+    }
+
+    static int Lua_MemoryPushI8Fn(lua_State* L) { return Lua_MemoryPushVarFn(L, MemoryVar::Type::Int8); }
+    static int Lua_MemoryPushU8Fn(lua_State* L) { return Lua_MemoryPushVarFn(L, MemoryVar::Type::UInt8); }
+    static int Lua_MemoryPushI16Fn(lua_State* L) { return Lua_MemoryPushVarFn(L, MemoryVar::Type::Int16); }
+    static int Lua_MemoryPushU16Fn(lua_State* L) { return Lua_MemoryPushVarFn(L, MemoryVar::Type::UInt16); }
+    static int Lua_MemoryPushI32Fn(lua_State* L) { return Lua_MemoryPushVarFn(L, MemoryVar::Type::Int32); }
+    static int Lua_MemoryPushU32Fn(lua_State* L) { return Lua_MemoryPushVarFn(L, MemoryVar::Type::UInt32); }
+    static int Lua_MemoryPushIntFn(lua_State* L) { return Lua_MemoryPushVarFn(L, MemoryVar::Type::Int); }
+    static int Lua_MemoryPushFloatFn(lua_State* L) { return Lua_MemoryPushVarFn(L, MemoryVar::Type::Float); }
+    static int Lua_MemoryPushDoubleFn(lua_State* L) { return Lua_MemoryPushVarFn(L, MemoryVar::Type::Double); }
+
+    template <typename TValue>
+    static int Lua_MemorySetValueFn(lua_State* L, MemoryVar::Type expected_type)
+    {
+        auto block = get_memory_block_by_handle(L, 1);
+        const char* name = luaext_checkstring(L, 2);
+        size_t index = find_memory_var_index(block, name);
+        if (index == static_cast<size_t>(-1))
+            return luaext_errorf(L, "variable '%s' does not exist", name);
+
+        auto& var = block->vars[index];
+        if (var.type != expected_type)
+            return luaext_errorf(L, "setter called on incompatible variable type");
+
+        if constexpr (std::is_same_v<TValue, int8_t>)
+            var.value.i8 = static_cast<int8_t>(luaext_checkint(L, 3));
+        else if constexpr (std::is_same_v<TValue, uint8_t>)
+            var.value.u8 = static_cast<uint8_t>(luaext_checkint(L, 3));
+        else if constexpr (std::is_same_v<TValue, int16_t>)
+            var.value.i16 = static_cast<int16_t>(luaext_checkint(L, 3));
+        else if constexpr (std::is_same_v<TValue, uint16_t>)
+            var.value.u16 = static_cast<uint16_t>(luaext_checkint(L, 3));
+        else if constexpr (std::is_same_v<TValue, int32_t>)
+        {
+            if (expected_type == MemoryVar::Type::Int)
+                var.value.i = static_cast<int32_t>(luaext_checkint(L, 3));
+            else
+                var.value.i32 = static_cast<int32_t>(luaext_checkint(L, 3));
+        }
+        else if constexpr (std::is_same_v<TValue, uint32_t>)
+            var.value.u32 = static_cast<uint32_t>(luaext_checknumber(L, 3));
+        else if constexpr (std::is_same_v<TValue, float>)
+            var.value.f = static_cast<float>(luaext_checknumber(L, 3));
+        else if constexpr (std::is_same_v<TValue, double>)
+            var.value.d = static_cast<double>(luaext_checknumber(L, 3));
+
+        write_memory_var_value(*block, var);
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
+    static int Lua_MemorySetI8Fn(lua_State* L) { return Lua_MemorySetValueFn<int8_t>(L, MemoryVar::Type::Int8); }
+    static int Lua_MemorySetU8Fn(lua_State* L) { return Lua_MemorySetValueFn<uint8_t>(L, MemoryVar::Type::UInt8); }
+    static int Lua_MemorySetI16Fn(lua_State* L) { return Lua_MemorySetValueFn<int16_t>(L, MemoryVar::Type::Int16); }
+    static int Lua_MemorySetU16Fn(lua_State* L) { return Lua_MemorySetValueFn<uint16_t>(L, MemoryVar::Type::UInt16); }
+    static int Lua_MemorySetI32Fn(lua_State* L) { return Lua_MemorySetValueFn<int32_t>(L, MemoryVar::Type::Int32); }
+    static int Lua_MemorySetU32Fn(lua_State* L) { return Lua_MemorySetValueFn<uint32_t>(L, MemoryVar::Type::UInt32); }
+    static int Lua_MemorySetIntFn(lua_State* L) { return Lua_MemorySetValueFn<int32_t>(L, MemoryVar::Type::Int); }
+    static int Lua_MemorySetFloatFn(lua_State* L) { return Lua_MemorySetValueFn<float>(L, MemoryVar::Type::Float); }
+    static int Lua_MemorySetDoubleFn(lua_State* L) { return Lua_MemorySetValueFn<double>(L, MemoryVar::Type::Double); }
+
+    static int Lua_MemoryAllocateFn(lua_State* L)
+    {
+        auto block = get_memory_block_by_handle(L, 1);
+
+        size_t final_size = block->requested_size;
+        if (final_size == 0)
+            final_size = block->current_offset;
+
+        if (final_size == 0)
+            return luaext_errorf(L, "memory block '%s' has no size", block->name.c_str());
+
+        if (final_size < block->current_offset)
+        {
+            return luaext_errorf(
+                L,
+                "memory block '%s' requested size %d is smaller than used size %d",
+                block->name.c_str(),
+                static_cast<int>(final_size),
+                static_cast<int>(block->current_offset)
+            );
+        }
+
+        if (!block->allocated_memory)
+        {
+            block->allocated_memory = VirtualAlloc(
+                nullptr,
+                final_size,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE
+            );
+
+            if (!block->allocated_memory)
+            {
+                lua_pushnil(L);
+                return 1;
+            }
+
+            block->allocated_size = final_size;
+        }
+
+        if (!block->persistent)
+        {
+            auto [it, inserted] = g_RegisteredMemoryBlocks.emplace(block->name, block);
+            if (!inserted && it->second != block)
+            {
+                return luaext_errorf(
+                    L,
+                    "memory block '%s' is already registered",
+                    block->name.c_str()
+                );
+            }
+
+            block->persistent = true;
+        }
+
+        ensure_memory_block_handle(block);
+
+        for (const auto& var : block->vars)
+            write_memory_var_value(*block, var);
+
+        lua_pushnumber(L, static_cast<lua_Number>(get_memory_block_address(block)));
+        return 1;
+    }
+
+    static int Lua_MemoryGetAddressFn(lua_State* L)
+    {
+        auto block = get_memory_block_by_handle(L, 1);
+        uintptr_t address = get_memory_block_address(block);
+        if (!address)
+            lua_pushnil(L);
+        else
+            lua_pushnumber(L, static_cast<lua_Number>(address));
+        return 1;
+    }
+
+    static int Lua_MemoryGetSizeFn(lua_State* L)
+    {
+        auto block = get_memory_block_by_handle(L, 1);
+        size_t size = block->allocated_size ? block->allocated_size :
+            (block->requested_size ? block->requested_size : block->current_offset);
+        lua_pushnumber(L, static_cast<lua_Number>(size));
+        return 1;
+    }
+
+    static int Lua_MemoryGetFieldAddressFn(lua_State* L)
+    {
+        auto block = get_memory_block_by_handle(L, 1);
+        const char* name = luaext_checkstring(L, 2);
+        size_t index = find_memory_var_index(block, name);
+        if (index == static_cast<size_t>(-1))
+            return luaext_errorf(L, "variable '%s' does not exist", name);
+
+        if (!block->allocated_memory)
+        {
+            lua_pushnil(L);
+            return 1;
+        }
+
+        uintptr_t address = reinterpret_cast<uintptr_t>(block->allocated_memory) + block->vars[index].offset;
+        lua_pushnumber(L, static_cast<lua_Number>(address));
+        return 1;
+    }
+
+    static int Lua_MemoryFreeFn(lua_State* L)
+    {
+        auto block = get_memory_block_by_handle(L, 1);
+
+        if (auto it = g_RegisteredMemoryBlocks.find(block->name);
+            it != g_RegisteredMemoryBlocks.end() && it->second == block)
+        {
+            g_RegisteredMemoryBlocks.erase(it);
+        }
+
+        block->persistent = false;
+
+        if (block->allocated_memory)
+        {
+            VirtualFree(block->allocated_memory, 0, MEM_RELEASE);
+            block->allocated_memory = nullptr;
+        }
+
+        block->allocated_size = 0;
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
 
     template <typename T>
     static int PatchValue(lua_State* L)
@@ -2246,9 +2886,15 @@ namespace LuaExtended
 
         uintptr_t compiled_address = CompileAssemblyScript(name, asm_text);
 
-        LuaReturns ret(L);
-        ret.push(compiled_address);
-        return ret.count();
+        if (compiled_address)
+        {
+            LuaReturns ret(L);
+            ret.push(compiled_address);
+            return ret.count();
+        }
+
+        lua_pushnil(L);
+        return 1;
     }
 
     static luaL_Reg lua_patching_functions[] =
@@ -2287,6 +2933,41 @@ namespace LuaExtended
         { "ReadPtr",     Read_uintptr_t },
         { "ReadIPtr",    Read_intptr_t },
         { "ReadSize",    Read_size_t },
+
+        { "MemoryCreate",          Lua_MemoryCreateFn },
+        { "MemoryFind",            Lua_MemoryFindFn },
+        { "MemoryPushI8",          Lua_MemoryPushI8Fn },
+        { "MemoryPushU8",          Lua_MemoryPushU8Fn },
+        { "MemoryPushI16",         Lua_MemoryPushI16Fn },
+        { "MemoryPushU16",         Lua_MemoryPushU16Fn },
+        { "MemoryPushI32",         Lua_MemoryPushI32Fn },
+        { "MemoryPushU32",         Lua_MemoryPushU32Fn },
+        { "MemoryPushInt",         Lua_MemoryPushIntFn },
+        { "MemoryPushFloat",       Lua_MemoryPushFloatFn },
+        { "MemoryPushDouble",      Lua_MemoryPushDoubleFn },
+        { "MemorySetI8",           Lua_MemorySetI8Fn },
+        { "MemorySetU8",           Lua_MemorySetU8Fn },
+        { "MemorySetI16",          Lua_MemorySetI16Fn },
+        { "MemorySetU16",          Lua_MemorySetU16Fn },
+        { "MemorySetI32",          Lua_MemorySetI32Fn },
+        { "MemorySetU32",          Lua_MemorySetU32Fn },
+        { "MemorySetInt",          Lua_MemorySetIntFn },
+        { "MemorySetFloat",        Lua_MemorySetFloatFn },
+        { "MemorySetDouble",       Lua_MemorySetDoubleFn },
+        { "MemoryWriteI8",         Lua_MemorySetI8Fn },
+        { "MemoryWriteU8",         Lua_MemorySetU8Fn },
+        { "MemoryWriteI16",        Lua_MemorySetI16Fn },
+        { "MemoryWriteU16",        Lua_MemorySetU16Fn },
+        { "MemoryWriteI32",        Lua_MemorySetI32Fn },
+        { "MemoryWriteU32",        Lua_MemorySetU32Fn },
+        { "MemoryWriteInt",        Lua_MemorySetIntFn },
+        { "MemoryWriteFloat",      Lua_MemorySetFloatFn },
+        { "MemoryWriteDouble",     Lua_MemorySetDoubleFn },
+        { "MemoryAllocate",        Lua_MemoryAllocateFn },
+        { "MemoryGetAddress",      Lua_MemoryGetAddressFn },
+        { "MemoryGetSize",         Lua_MemoryGetSizeFn },
+        { "MemoryGetFieldAddress", Lua_MemoryGetFieldAddressFn },
+        { "MemoryFree",            Lua_MemoryFreeFn },
 
         { NULL, NULL }
     };
@@ -2344,7 +3025,7 @@ namespace LuaExtended
 
         static auto register_main = safetyhook::create_mid(0x89DA60, [](SafetyHookContext& ctx) {
             //luaL_openlib((lua_State*)ctx.eax, lua_patching_functions, "_G");
-
+            luaL_openlib((lua_State*)ctx.eax, lua_patching_functions, "_G");
 
             });
 
