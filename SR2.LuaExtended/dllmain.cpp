@@ -1391,13 +1391,34 @@ namespace LuaExtended
         return 1;
     }
 
+    static std::filesystem::path get_lext_ini_dir()
+    {
+        WCHAR buffer[MAX_PATH];
+        GetModuleFileNameW(NULL, buffer, ARRAYSIZE(buffer));
+        return std::filesystem::path(buffer).parent_path() / L"lext";
+    }
+
     static int Lua_IniOpenFn(lua_State* L)
     {
         const char* path = luaext_checkstring(L, 1);
 
+        std::filesystem::path resolved;
+        std::filesystem::path supplied = path ? path : "";
+        if (supplied.is_absolute())
+        {
+            resolved = supplied;
+        }
+        else
+        {
+            auto dir = get_lext_ini_dir();
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            resolved = supplied.empty() ? dir / L"settings.ini" : dir / supplied;
+        }
+
         int handle = g_NextIniHandle++;
         auto& ini = g_IniHandles[handle];
-        ini.reader = std::make_unique<CIniReader>(path ? path : "");
+        ini.reader = std::make_unique<CIniReader>(resolved);
         ini.bindings.clear();
 
         lua_pushnumber(L, static_cast<lua_Number>(handle));
