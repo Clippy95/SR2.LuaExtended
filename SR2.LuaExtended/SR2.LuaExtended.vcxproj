@@ -191,6 +191,7 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="AssemblyModule.h" />
     <ClInclude Include="external\asmjit\asmjit\a64.h" />
     <ClInclude Include="external\asmjit\asmjit\arm.h" />
     <ClInclude Include="external\asmjit\asmjit\arm\a64archtraits_p.h" />
@@ -317,6 +318,7 @@
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="AssemblyModule.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="external\asmjit\asmjit\arm\a64assembler.cpp" />
     <ClCompile Include="external\asmjit\asmjit\arm\a64builder.cpp" />
