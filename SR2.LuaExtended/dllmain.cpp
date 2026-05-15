@@ -100,6 +100,11 @@ __declspec(noinline) AT DynAddress(AT address)
     return address;
 }
 
+bool isAddrInExe(uintptr_t inputAddr)
+{
+    return inputAddr >= 0x00400000ULL && inputAddr <= 0x03559000ULL;
+}
+
 inline uintptr_t operator""_g(unsigned long long val)
 {
     return DynAddress(static_cast<uintptr_t>(val));
@@ -1627,13 +1632,23 @@ namespace LuaExtended
 
         auto address = args.get<uintptr_t>();
         auto value = args.get<T>();
+        auto vp = args.get_or<bool>(false);
+        auto dyn = args.get_or<bool>(true);
         auto source = GetCurrentLuaSource(L);
         lextprint(
             "PatchValue called from Lua source: %s\n",
             source.c_str()
         );
-
-        Patch<T>(address, value);
+        if (!isAddrInExe(address))
+            dyn = false;
+        if (vp && dyn)
+            Memory::VP::DynBase::Patch(address, value);
+        else if (vp && !dyn)
+            Memory::VP::Patch(address, value);
+        else if (!vp && dyn)
+            Memory::DynBase::Patch(address, value);
+        else
+            Memory::Patch(address, value);
 
         return 0;
     }
@@ -1644,14 +1659,28 @@ namespace LuaExtended
         LuaArgs args(L);
 
         auto address = args.get<uintptr_t>();
+        auto vp = args.get_or<bool>(false);
+        auto dyn = args.get_or<bool>(true);
+        T value{};
+
+        if (!isAddrInExe(address))
+            dyn = false;
+
         auto source = GetCurrentLuaSource(L);
         lextprint(
             "ReadValue called from Lua source: %s\n",
             source.c_str()
         );
 
-        T value = 0;
-        Read(address, value);
+        if (vp && dyn)
+            Memory::VP::DynBase::Read(address, value);
+        else if (vp && !dyn)
+            Memory::VP::Read(address, value);
+        else if (!vp && dyn)
+            Memory::DynBase::Read(address, value);
+        else
+            Memory::Read(address, value);
+
         LuaReturns ret(L);
         ret.push(value);
         return ret.count();
