@@ -102,11 +102,11 @@ bool CreateCache(const char* DirListFile)
     FILE* DirListHandle = fopen(DirListFile, "r");
     if (!DirListHandle)
     {
-        //Logger::TypedLog(CHN_DLL, "Failed to open directory list file {}\n", DirListFile);
+        lextprint("Failed to open directory list file %s\n", DirListFile);
         return(false);
     }
 
-    //Logger::TypedLog(CHN_DLL, "Creating cache directory data from {}\n", DirListFile);
+    lextprint("Creating cache directory data from %s\n", DirListFile);
 
     char CurrentDirectory[MAX_PATH];
     char CurrentSearch[MAX_PATH];
@@ -148,11 +148,11 @@ bool CreateCache(const char* DirListFile)
         // Check for errors searching the directory
         if (SearchDirHandle == INVALID_HANDLE_VALUE)
         {
-            //Logger::TypedLog(CHN_DLL, "Unable to find directory {}\n", CurrentDirectory);
+            lextprint("Unable to find directory %s\n", CurrentDirectory);
             continue;
         }
 
-        //Logger::TypedLog(CHN_DLL, "Adding contents of directory {}\n", CurrentDirectory);
+        lextprint("Adding contents of directory %s\n", CurrentDirectory);
 
         do
         {
@@ -383,11 +383,10 @@ static bool AssembleX86Text(
     if (err != asmjit::Error::kOk)
     {
         // TODO LOGGER
-        //::Logger::TypedLog(
-        //    CHN_DEBUG,
-        //    "AsmTK: code.init failed: {}",
-        //    asmjit::DebugUtils::error_as_string(err)
-        //);
+        lextprint(
+            "AsmTK: code.init failed: %s\n",
+            asmjit::DebugUtils::error_as_string(err)
+        );
 
         return false;
     }
@@ -400,17 +399,15 @@ static bool AssembleX86Text(
     if (err != asmjit::Error::kOk)
     {
         // TODO LOGGER
-        //::Logger::TypedLog(
-        //    CHN_DEBUG,
-        //    "AsmTK parse failed: {}",
-        //    asmjit::DebugUtils::error_as_string(err)
-        //);
+        lextprint(
+            "AsmTK parse failed: %s\n",
+            asmjit::DebugUtils::error_as_string(err)
+        );
 
-        //::Logger::TypedLog(
-        //    CHN_DEBUG,
-        //    "AsmTK input:\n{}",
-        //    asm_text
-        //);
+        lextprint(
+            "AsmTK input:\n%s\n",
+            asm_text.c_str()
+        );
 
         return false;
     }
@@ -504,11 +501,10 @@ static bool RelocateRelativeInstructionX86(
             if (new_disp < INT8_MIN || new_disp > INT8_MAX)
             {
                 // TODO : LOGGER
-                //Logger::TypedLog(
-                //    CHN_DEBUG,
-                //    "Relocate: rel8 out of range at {:X}",
-                //    old_ip
-                //);
+                lextprint(
+                    "Relocate: rel8 out of range at 0x%llX\n",
+                    static_cast<unsigned long long>(old_ip)
+                );
                 return false;
             }
 
@@ -708,11 +704,10 @@ static bool BuildDecodedRelocInstructions(
             ri.operands
         )))
         {
-            //::Logger::TypedLog(
-            //    CHN_DEBUG,
-            //    "Relocate: failed to decode instruction at {:X}",
-            //    ri.old_ip
-            //);
+            lextprint(
+                "Relocate: failed to decode instruction at 0x%llX\n",
+                static_cast<unsigned long long>(ri.old_ip)
+            );
 
             return false;
         }
@@ -805,11 +800,10 @@ static bool ResolveRelocatedTarget(
     }
 
     // Branch into the middle of an instruction is unsafe.
-    //::Logger::TypedLog(
-    //    CHN_DEBUG,
-    //    "Relocate: target {:X} lands inside stolen block but not on instruction boundary",
-    //    target
-    //);
+    lextprint(
+        "Relocate: target 0x%llX lands inside stolen block but not on instruction boundary\n",
+        static_cast<unsigned long long>(target)
+    );
 
     return false;
 }
@@ -904,11 +898,10 @@ static bool EmitRelocatedInstruction(
             relocated_target
         ))
         {
-            //::Logger::TypedLog(
-            //    CHN_DEBUG,
-            //    "Relocate: rel32 out of range at {:X}",
-            //    ri.old_ip
-            //);
+            lextprint(
+                "Relocate: rel32 out of range at 0x%llX\n",
+                static_cast<unsigned long long>(ri.old_ip)
+            );
 
             return false;
         }
@@ -1025,11 +1018,10 @@ static bool RelocateOriginalCodeX86(
             out_bytes
         ))
         {
-            //::Logger::TypedLog(
-            //    CHN_DEBUG,
-            //    "RelocateOriginalCodeX86: failed at {:X}",
-            //    ri.old_ip
-            //);
+            lextprint(
+                "RelocateOriginalCodeX86: failed at 0x%llX\n",
+                static_cast<unsigned long long>(ri.old_ip)
+            );
 
             return false;
         }
@@ -1038,13 +1030,12 @@ static bool RelocateOriginalCodeX86(
 
         if (emitted != ri.emitted_size)
         {
-            //::Logger::TypedLog(
-            //    CHN_DEBUG,
-            //    "RelocateOriginalCodeX86: size mismatch at {:X}. expected={} got={}",
-            //    ri.old_ip,
-            //    ri.emitted_size,
-            //    emitted
-            //);
+            lextprint(
+                "RelocateOriginalCodeX86: size mismatch at 0x%llX. expected=%zu got=%zu\n",
+                static_cast<unsigned long long>(ri.old_ip),
+                ri.emitted_size,
+                emitted
+            );
 
             return false;
         }
@@ -1224,11 +1215,10 @@ static bool CompileAssemblyBlock(AssemblyHookBlock& block)
 
     if (!DecodeStolenSize(block.hook_address, JMP_SIZE, block.stolen_size))
     {
-        //::Logger::TypedLog(
-        //    CHN_DEBUG,
-        //    "CompileAssembly: failed to decode stolen size at {:X}",
-        //    block.hook_address
-        //);
+        lextprint(
+            "CompileAssembly: failed to decode stolen size at 0x%llX\n",
+            static_cast<unsigned long long>(block.hook_address)
+        );
 
         return false;
     }
@@ -1309,7 +1299,7 @@ static bool CompileAssemblyBlock(AssemblyHookBlock& block)
 
     if (estimated_size == 0)
     {
-        //::Logger::TypedLog(CHN_DEBUG, "CompileAssembly: estimated size was zero");
+        lextprint("CompileAssembly: estimated size was zero\n");
         return false;
     }
 
@@ -1322,13 +1312,13 @@ static bool CompileAssemblyBlock(AssemblyHookBlock& block)
 
     if (!cave)
     {
-        //::Logger::TypedLog(CHN_DEBUG, "CompileAssembly: codecave pool allocation failed");
+        lextprint("CompileAssembly: codecave pool allocation failed\n");
         return false;
     }
 
     if (!cave)
     {
-        //::Logger::TypedLog(CHN_DEBUG, "CompileAssembly: VirtualAlloc failed");
+        lextprint("CompileAssembly: VirtualAlloc failed\n");
         return false;
     }
 
@@ -1413,7 +1403,7 @@ static bool CompileAssemblyBlock(AssemblyHookBlock& block)
 
         if (!cave)
         {
-            //::Logger::TypedLog(CHN_DEBUG, "CompileAssembly: codecave pool allocation failed");
+            lextprint("CompileAssembly: codecave pool allocation failed\n");
             return false;
         }
 
@@ -1491,7 +1481,7 @@ static bool CompileAssemblyBlock(AssemblyHookBlock& block)
         block.stolen_size
     ))
     {
-        //::Logger::TypedLog(CHN_DEBUG, "CompileAssembly: failed to write JMP");
+        lextprint("CompileAssembly: failed to write JMP\n");
         VirtualFree(cave, 0, MEM_RELEASE);
         return false;
     }
@@ -1504,16 +1494,15 @@ static bool CompileAssemblyBlock(AssemblyHookBlock& block)
         block.final_bytes.size()
         });
 
-    //::Logger::TypedLog(
-    //    CHN_DEBUG,
-    //    "CompileAssembly: {} hooked {:X} -> {:X}, stolen={} used={} alloc={}",
-    //    block.name,
-    //    block.hook_address,
-    //    block.codecave_address,
-    //    block.stolen_size,
-    //    block.final_bytes.size(),
-    //    alloc_size
-    //);
+    lextprint(
+        "CompileAssembly: %s hooked 0x%llX -> 0x%llX, stolen=%zu used=%zu alloc=%zu\n",
+        block.name.c_str(),
+        static_cast<unsigned long long>(block.hook_address),
+        static_cast<unsigned long long>(block.codecave_address),
+        block.stolen_size,
+        block.final_bytes.size(),
+        alloc_size
+    );
 
     return true;
 }
@@ -1524,7 +1513,7 @@ static bool CompileAssemblyScript(const char* name, const char* script)
 
     if (!ParseAssemblyScript(name, script, block))
     {
-        //Logger::TypedLog(CHN_DEBUG, "CompileAssembly: parse failed");
+        lextprint("CompileAssembly: parse failed\n");
         return false;
     }
 
@@ -1803,7 +1792,7 @@ namespace LuaExtended
 
         if (ls == nullptr)
         {
-            //Logger::TypedLog(CHN_DEBUG, "LuaExtended: Vint lua state is null");
+            lextprint("LuaExtended: Vint lua state is null\n");
             return;
         }
 
@@ -1820,7 +1809,7 @@ namespace LuaExtended
 
             if (!read_file_binary(filepath, buffer))
             {
-                //Logger::TypedLog(CHN_DEBUG, "LuaExtended: failed to read {}", filepath);
+                lextprint("LuaExtended: failed to read %s\n", filepath.c_str());
                 continue;
             }
             //General::generalluaLoadBuff_disabled = true;
@@ -1831,12 +1820,11 @@ namespace LuaExtended
                 filename.c_str()
             );
             //General::generalluaLoadBuff_disabled = false;
-            //Logger::TypedLog(
-            //    CHN_DEBUG,
-            //    "LuaExtended: loaded {} result={}",
-            //    filename,
-            //    result
-            //);
+            lextprint(
+                "LuaExtended: loaded %s result=%d\n",
+                filename.c_str(),
+                result
+            );
 
             auto init = make_func_name(filename, "_init");
             auto main = make_func_name(filename, "_main");
@@ -1915,11 +1903,10 @@ namespace LuaExtended
         auto address = args.get<uintptr_t>();
         auto value = args.get<T>();
         auto source = GetCurrentLuaSource(L);
-        //Logger::TypedLog(
-        //    CHN_DEBUG,
-        //    "PatchValue called from Lua source: {}",
-        //    source
-        //);
+        lextprint(
+            "PatchValue called from Lua source: %s\n",
+            source.c_str()
+        );
 
         Patch<T>(address, value);
 
@@ -2066,11 +2053,10 @@ namespace LuaExtended
         {
             const char* err = lua_tostring(L, -1);
 
-            //::Logger::TypedLog(
-            //    CHN_DEBUG,
-            //    "debug_print pcall failed: {}",
-            //    err ? err : "unknown error"
-            //);
+            lextprint(
+                "debug_print pcall failed: %s\n",
+                err ? err : "unknown error"
+            );
         }
 
         lua_settop(L, top);
@@ -2211,13 +2197,12 @@ namespace LuaExtended
                 if (!loaded.insert(file.filename).second)
                     return;
 
-                //Logger::TypedLog(
-                //    CHN_DEBUG,
-                //    "CTS: loading loose gs cts {} header={} success={}",
-                //    file.filename,
-                //    file.header_name,
-                //    cdecl_call<char>(load_cts_addr, file.load_name.c_str())
-                //);
+                lextprint(
+                    "CTS: loading loose gs cts %s header=%s success=%d\n",
+                    file.filename.c_str(),
+                    file.header_name.c_str(),
+                    static_cast<int>(cdecl_call<char>(load_cts_addr, file.load_name.c_str()))
+                );
 
                 ;
             };
