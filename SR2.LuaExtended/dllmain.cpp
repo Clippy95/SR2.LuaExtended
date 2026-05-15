@@ -24,10 +24,61 @@
 #include <map>
 #include "IniReader.h"
 #include "ankerl/unordered_dense.h"
+
+#define LEX_VERSION "0.0.1"
+
 #define lextprint(format, ...) \
     do { \
             printf("[LUA Extended] " format, ##__VA_ARGS__); \
     } while(0)
+
+void __declspec(naked) InGamePrintASMSS(int a1, const char* a2, int a3, int a4, float a5) {
+    __asm {
+        push ebp
+        mov ebp, esp
+        sub esp, __LOCAL_SIZE
+
+        push edi
+        push esi
+        push eax
+
+        mov edi, a1
+        mov esi, a2
+        push a5
+        push a4
+        push a3
+
+        mov eax, 0xD15D00
+        call eax
+
+        pop eax
+        pop esi
+        pop edi
+
+        mov esp, ebp
+        pop ebp
+        ret
+    }
+}
+
+int processtextwidth(int width) {
+    bool& r_is_widescreen = *(bool*)0x025272DD;
+    if (!r_is_widescreen)
+        return 0;
+    float* currentAR = (float*)0x022FD8EC;
+    if (*currentAR >= 1.77777777778f) {
+        int offset = (int)(*currentAR * 720);
+        offset -= 1280;
+        if (offset != 0) {
+            width += offset / 2;
+        }
+    }
+    return width;
+
+}
+
+typedef float(__cdecl* ChangeTextColorT)(int R, int G, int B, int Alpha);
+ChangeTextColorT ChangeTextColor = (ChangeTextColorT)0xD14840;
 
 using namespace Memory::VP;
 static auto HandleDynAddress = GetModuleHandle(nullptr);
@@ -3230,8 +3281,41 @@ namespace LuaExtended
         lextprint("Oh, Hi Mark\n");
     }
 
+    SafetyHookInline main_menu_renderD;
+
+    void InGamePrintScale(int font, const char* a2, int a3, int a4, float a5) {
+        InGamePrintASMSS(font, a2, a3, a4, a5);
+    }
+
+    void __cdecl main_menu_render_hook()
+    {
+        if (*(BYTE*)0x02527B75 == 1 && *(BYTE*)0xE8D56B == 1) {
+            ChangeTextColor(255 / 2, 255 / 2, 255 / 2, 255);
+            static int fuck1;
+            static int fuck2;
+            int gs_count = 0;
+            int ui_count = 0;
+            for (auto& entry : DirCache)
+            {
+                const std::string& filename = entry.first; // should already be lowercase
+                const std::string& filepath = entry.second.FilePath;
+                if (filename.ends_with("_gs.lua"))
+                    gs_count++;
+                else if (filename.ends_with("_ui.lua"))
+                    ui_count++;
+            }
+            static char buffer[1024];
+            sprintf_s(buffer, sizeof(buffer), "LuaExtended %s\nui: %d\ngs: %d", LEX_VERSION,ui_count , gs_count);
+
+            InGamePrintScale(*(int*)0xE98A24, buffer, processtextwidth(0), 640, 0.7f);
+
+        }
+        main_menu_renderD.unsafe_ccall<void>();
+
+    }
     void Attach()
     {
+
         OpenConsoleSafe();
         CIniReader ini;
         auto FileToParse = ini.ReadString("MAIN", "FileToParse", "loose.txt");
@@ -3239,6 +3323,7 @@ namespace LuaExtended
         o_read_numeral = safetyhook::create_inline(0xD70450, hk_read_numeral);
         LuaExtended::Init();
         InterceptCall(0xA248A3, load_cts_addr, load_cts);
+        main_menu_renderD = safetyhook::create_inline(0x75B270, main_menu_render_hook);
 
     }
 }
