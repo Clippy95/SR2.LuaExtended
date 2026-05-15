@@ -1828,34 +1828,42 @@ namespace LuaExtended
 
     int Lua_IsMousePressed(lua_State* L)
     {
-        int index = luaext_checkint(L, 1);
+        LuaArgs args(L);
+        int index = args.get<int>();
         mouse_button* button = get_mouse_button(index);
-        lua_pushboolean(L, button && button->just_pressed);
-        return 1;
+        LuaReturns ret(L);
+        ret.push(button && button->just_pressed);
+        return ret.count();
     }
 
     int Lua_IsMouseDown(lua_State* L)
     {
-        int index = luaext_checkint(L, 1);
+        LuaArgs args(L);
+        int index = args.get<int>();
         mouse_button* button = get_mouse_button(index);
-        lua_pushboolean(L, button && button->down);
-        return 1;
+        LuaReturns ret(L);
+        ret.push(button && button->down);
+        return ret.count();
     }
 
     int Lua_IsKeyDown(lua_State* L)
     {
-        int index = luaext_checkint(L, 1);
+        LuaArgs args(L);
+        int index = args.get<int>();
         key* state = get_keystate(index);
-        lua_pushboolean(L, state && state->down);
-        return 1;
+        LuaReturns ret(L);
+        ret.push(state && state->down);
+        return ret.count();
     }
 
     int Lua_IsKeyJustDown(lua_State* L)
     {
-        int index = luaext_checkint(L, 1);
+        LuaArgs args(L);
+        int index = args.get<int>();
         key* state = get_keystate(index);
-        lua_pushboolean(L, state && state->just_down);
-        return 1;
+        LuaReturns ret(L);
+        ret.push(state && state->just_down);
+        return ret.count();
     }
 
     int Lua_CompileAssembly(lua_State* L)
@@ -1884,7 +1892,7 @@ namespace LuaExtended
         { "IsMousePressed", Lua_IsMousePressed },
         { "IsMouseDown",    Lua_IsMouseDown },
         { "IsKeyDown",      Lua_IsKeyDown },
-        { "IsKeyJustDown",  Lua_IsKeyJustDown },
+        { "IsKeyPressed",  Lua_IsKeyJustDown },
         { "PatchBool",   Patch_bool },
         { "ReadBool",    Read_bool },
 
