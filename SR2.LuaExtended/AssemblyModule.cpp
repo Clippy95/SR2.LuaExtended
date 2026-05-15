@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "AssemblyModule.h"
+#include "LuaExtendedLogging.h"
 
 #include <asmjit/x86.h>
 #include <asmtk/asmtk.h>
@@ -14,11 +15,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#define lextprint(format, ...) \
-    do { \
-            printf("[LUA Extended] " format, ##__VA_ARGS__); \
-    } while(0)
 
 namespace LuaExtended
 {

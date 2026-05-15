@@ -10,9 +10,12 @@
 #include <memory>
 #include <algorithm>
 #include <filesystem>
+#include <mutex>
+#include <cstdarg>
 #include <unordered_set>
 #include "GLua.h"
 #include "AssemblyModule.h"
+#include "LuaExtendedLogging.h"
 
 #include "MemoryMgr.h"
 #include <shlwapi.h>
@@ -21,11 +24,6 @@
 #include "IniReader.h"
 
 #define LEX_VERSION "0.0.1"
-
-#define lextprint(format, ...) \
-    do { \
-            printf("[LUA Extended] " format, ##__VA_ARGS__); \
-    } while(0)
 
 void __declspec(naked) InGamePrintASMSS(int a1, const char* a2, int a3, int a4, float a5) {
     __asm {
@@ -342,6 +340,63 @@ key* get_keystate(int index)
 
 namespace LuaExtended
 {
+    static std::mutex g_LogMutex;
+    static std::vector<std::string> g_DebugLogLines;
+    static bool g_DebugLogFlushed = false;
+
+    static std::filesystem::path GetDebugLogPath()
+    {
+        char exe_path[MAX_PATH]{};
+        DWORD length = GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
+
+        if (length > 0 && length < MAX_PATH)
+        {
+            std::filesystem::path path(exe_path);
+            return path.parent_path() / "lext_debug.txt";
+        }
+
+        return std::filesystem::path("lext_debug.txt");
+    }
+
+    void LogPrintf(const char* format, ...)
+    {
+        if (!format)
+            return;
+
+        char message[4096]{};
+
+        va_list args;
+        va_start(args, format);
+        vsnprintf(message, sizeof(message), format, args);
+        va_end(args);
+
+        std::string full_message = "[LUA Extended] ";
+        full_message += message;
+
+        fputs(full_message.c_str(), stdout);
+        fflush(stdout);
+
+        std::lock_guard lock(g_LogMutex);
+        g_DebugLogLines.push_back(std::move(full_message));
+    }
+
+    void FlushDebugLog()
+    {
+        std::lock_guard lock(g_LogMutex);
+
+        if (g_DebugLogFlushed || g_DebugLogLines.empty())
+            return;
+
+        std::ofstream file(GetDebugLogPath(), std::ios::out | std::ios::trunc | std::ios::binary);
+        if (!file.is_open())
+            return;
+
+        for (const auto& line : g_DebugLogLines)
+            file << line;
+
+        g_DebugLogFlushed = true;
+    }
+
 
     int __cdecl luaZ_fill(Zio* z)
     {
@@ -2339,7 +2394,9 @@ BOOL APIENTRY DllMain( HMODULE hModule,
     }
     case DLL_THREAD_ATTACH:
     case DLL_THREAD_DETACH:
+        break;
     case DLL_PROCESS_DETACH:
+        LuaExtended::FlushDebugLog();
         break;
     }
     return TRUE;

@@ -192,6 +192,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="AssemblyModule.h" />
+    <ClInclude Include="LuaExtendedLogging.h" />
     <ClInclude Include="external\asmjit\asmjit\a64.h" />
     <ClInclude Include="external\asmjit\asmjit\arm.h" />
     <ClInclude Include="external\asmjit\asmjit\arm\a64archtraits_p.h" />
