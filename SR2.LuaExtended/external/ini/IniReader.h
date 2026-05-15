@@ -179,6 +179,36 @@ public:
             return fltDefaultValue;
         }
     }
+
+    double ReadDouble(std::string_view szSection, std::string_view szKey, double dblDefaultValue, bool createIfMissing = true)
+    {
+        try
+        {
+            if (!m_ini.size() || !m_ini.has(szSection.data()) || !m_ini[szSection.data()].has(szKey.data()))
+            {
+                if (createIfMissing)
+                {
+                    m_ini[szSection.data()][szKey.data()] = std::to_string(dblDefaultValue);
+                    mINI::INIFile file(m_szFileName);
+                    file.write(m_ini);
+                }
+                return dblDefaultValue;
+            }
+
+            auto& value = m_ini[szSection.data()][szKey.data()];
+            return std::strtod(value.data(), nullptr);
+        }
+        catch (...)
+        {
+            if (createIfMissing)
+            {
+                m_ini[szSection.data()][szKey.data()] = std::to_string(dblDefaultValue);
+                mINI::INIFile file(m_szFileName);
+                file.write(m_ini);
+            }
+            return dblDefaultValue;
+        }
+    }
     
     bool ReadBoolean(std::string_view szSection, std::string_view szKey, bool bolDefaultValue, bool createIfMissing = true)
     {
@@ -293,6 +323,17 @@ public:
         {
             mINI::INIFile file(m_szFileName);
             m_ini[szSection.data()][szKey.data()] = std::to_string(fltValue);
+            file.write(m_ini, pretty);
+        }
+        catch (...) {}
+    }
+
+    void WriteDouble(std::string_view szSection, std::string_view szKey, double dblValue, bool pretty = false)
+    {
+        try
+        {
+            mINI::INIFile file(m_szFileName);
+            m_ini[szSection.data()][szKey.data()] = std::to_string(dblValue);
             file.write(m_ini, pretty);
         }
         catch (...) {}

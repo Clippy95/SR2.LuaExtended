@@ -7,6 +7,7 @@
 #include <fstream>
 #include <vector>
 #include <string>
+#include <memory>
 #include <algorithm>
 #include <filesystem>
 
@@ -2223,6 +2224,33 @@ namespace LuaExtended
     static std::unordered_map<MemoryBlock*, int> g_MemoryHandlesByBlock;
     static std::unordered_map<std::string, int> g_MemoryHandlesByName;
 
+    enum class IniValueType
+    {
+        Integer,
+        Float,
+        Double,
+        Boolean,
+        String,
+    };
+
+    struct IniMemoryBinding
+    {
+        std::string section;
+        std::string key;
+        IniValueType value_type{};
+        int memory_handle{};
+        std::string variable_name;
+    };
+
+    struct LuaIniHandle
+    {
+        std::unique_ptr<CIniReader> reader;
+        std::vector<IniMemoryBinding> bindings;
+    };
+
+    static int g_NextIniHandle = 1;
+    static std::unordered_map<int, LuaIniHandle> g_IniHandles;
+
     static int luaext_errorf(lua_State* L, const char* fmt, ...)
     {
         va_list args;
@@ -2320,6 +2348,73 @@ namespace LuaExtended
         if (it == g_MemoryBlocksByHandle.end() || !it->second)
             luaext_errorf(L, "invalid memory handle");
         return it->second;
+    }
+
+    static LuaIniHandle& get_ini_handle(lua_State* L, int index)
+    {
+        int handle = luaext_checkint(L, index);
+        auto it = g_IniHandles.find(handle);
+        if (it == g_IniHandles.end() || !it->second.reader)
+            luaext_errorf(L, "invalid ini handle");
+        return it->second;
+    }
+
+    static void upsert_ini_binding(
+        LuaIniHandle& ini,
+        std::string_view section,
+        std::string_view key,
+        IniValueType value_type,
+        int memory_handle,
+        std::string_view variable_name)
+    {
+        for (auto& binding : ini.bindings)
+        {
+            if (binding.section == section && binding.key == key)
+            {
+                binding.value_type = value_type;
+                binding.memory_handle = memory_handle;
+                binding.variable_name = variable_name;
+                return;
+            }
+        }
+
+        IniMemoryBinding binding{};
+        binding.section = std::string(section);
+        binding.key = std::string(key);
+        binding.value_type = value_type;
+        binding.memory_handle = memory_handle;
+        binding.variable_name = std::string(variable_name);
+        ini.bindings.push_back(std::move(binding));
+    }
+
+    static void parse_ini_binding_args(
+        lua_State* L,
+        int first_optional_index,
+        bool& create_if_missing,
+        bool& has_binding,
+        int& memory_handle,
+        std::string& variable_name)
+    {
+        create_if_missing = true;
+        has_binding = false;
+        memory_handle = 0;
+        variable_name.clear();
+
+        int top = lua_gettop(L);
+        int next_index = first_optional_index;
+
+        if (top >= next_index && lua_isboolean(L, next_index))
+        {
+            create_if_missing = lua_toboolean(L, next_index) != 0;
+            ++next_index;
+        }
+
+        if (top >= next_index + 1)
+        {
+            memory_handle = luaext_checkint(L, next_index);
+            variable_name = luaext_checkstring(L, next_index + 1);
+            has_binding = true;
+        }
     }
 
     static size_t get_memory_var_alignment(MemoryVar::Type type)
@@ -2750,6 +2845,239 @@ namespace LuaExtended
         return 1;
     }
 
+    static int Lua_IniOpenFn(lua_State* L)
+    {
+        const char* path = luaext_checkstring(L, 1);
+
+        int handle = g_NextIniHandle++;
+        auto& ini = g_IniHandles[handle];
+        ini.reader = std::make_unique<CIniReader>(path ? path : "");
+        ini.bindings.clear();
+
+        lua_pushnumber(L, static_cast<lua_Number>(handle));
+        return 1;
+    }
+
+    static int Lua_IniCloseFn(lua_State* L)
+    {
+        int handle = luaext_checkint(L, 1);
+        auto it = g_IniHandles.find(handle);
+        if (it == g_IniHandles.end())
+        {
+            lua_pushboolean(L, 0);
+            return 1;
+        }
+
+        g_IniHandles.erase(it);
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
+    static int Lua_IniGetPathFn(lua_State* L)
+    {
+        auto& ini = get_ini_handle(L, 1);
+        lua_pushstring(L, ini.reader->GetIniPath().string().c_str());
+        return 1;
+    }
+
+    static int Lua_IniGetIntFn(lua_State* L)
+    {
+        auto& ini = get_ini_handle(L, 1);
+        const char* section = luaext_checkstring(L, 2);
+        const char* key = luaext_checkstring(L, 3);
+        int default_value = luaext_checkint(L, 4);
+
+        bool create_if_missing{};
+        bool has_binding{};
+        int memory_handle{};
+        std::string variable_name;
+        parse_ini_binding_args(L, 5, create_if_missing, has_binding, memory_handle, variable_name);
+
+        int value = ini.reader->ReadInteger(section, key, default_value, create_if_missing);
+        if (has_binding)
+            upsert_ini_binding(ini, section, key, IniValueType::Integer, memory_handle, variable_name);
+
+        lua_pushnumber(L, static_cast<lua_Number>(value));
+        return 1;
+    }
+
+    static int Lua_IniGetFloatFn(lua_State* L)
+    {
+        auto& ini = get_ini_handle(L, 1);
+        const char* section = luaext_checkstring(L, 2);
+        const char* key = luaext_checkstring(L, 3);
+        float default_value = static_cast<float>(luaext_checknumber(L, 4));
+
+        bool create_if_missing{};
+        bool has_binding{};
+        int memory_handle{};
+        std::string variable_name;
+        parse_ini_binding_args(L, 5, create_if_missing, has_binding, memory_handle, variable_name);
+
+        float value = ini.reader->ReadFloat(section, key, default_value, create_if_missing);
+        if (has_binding)
+            upsert_ini_binding(ini, section, key, IniValueType::Float, memory_handle, variable_name);
+
+        lua_pushnumber(L, static_cast<lua_Number>(value));
+        return 1;
+    }
+
+    static int Lua_IniGetDoubleFn(lua_State* L)
+    {
+        auto& ini = get_ini_handle(L, 1);
+        const char* section = luaext_checkstring(L, 2);
+        const char* key = luaext_checkstring(L, 3);
+        double default_value = static_cast<double>(luaext_checknumber(L, 4));
+
+        bool create_if_missing{};
+        bool has_binding{};
+        int memory_handle{};
+        std::string variable_name;
+        parse_ini_binding_args(L, 5, create_if_missing, has_binding, memory_handle, variable_name);
+
+        double value = ini.reader->ReadDouble(section, key, default_value, create_if_missing);
+        if (has_binding)
+            upsert_ini_binding(ini, section, key, IniValueType::Double, memory_handle, variable_name);
+
+        lua_pushnumber(L, static_cast<lua_Number>(value));
+        return 1;
+    }
+
+    static int Lua_IniGetBoolFn(lua_State* L)
+    {
+        auto& ini = get_ini_handle(L, 1);
+        const char* section = luaext_checkstring(L, 2);
+        const char* key = luaext_checkstring(L, 3);
+        bool default_value = lua_toboolean(L, 4) != 0;
+
+        bool create_if_missing{};
+        bool has_binding{};
+        int memory_handle{};
+        std::string variable_name;
+        parse_ini_binding_args(L, 5, create_if_missing, has_binding, memory_handle, variable_name);
+
+        bool value = ini.reader->ReadBoolean(section, key, default_value, create_if_missing);
+        if (has_binding)
+            upsert_ini_binding(ini, section, key, IniValueType::Boolean, memory_handle, variable_name);
+
+        lua_pushboolean(L, value ? 1 : 0);
+        return 1;
+    }
+
+    static int Lua_IniGetStringFn(lua_State* L)
+    {
+        auto& ini = get_ini_handle(L, 1);
+        const char* section = luaext_checkstring(L, 2);
+        const char* key = luaext_checkstring(L, 3);
+        const char* default_value = luaext_checkstring(L, 4);
+
+        bool create_if_missing{};
+        bool has_binding{};
+        int memory_handle{};
+        std::string variable_name;
+        parse_ini_binding_args(L, 5, create_if_missing, has_binding, memory_handle, variable_name);
+
+        std::string value = ini.reader->ReadString(section, key, default_value, create_if_missing);
+        if (has_binding)
+            upsert_ini_binding(ini, section, key, IniValueType::String, memory_handle, variable_name);
+
+        lua_pushstring(L, value.c_str());
+        return 1;
+    }
+
+    static int Lua_IniSetIntFn(lua_State* L)
+    {
+        auto& ini = get_ini_handle(L, 1);
+        const char* section = luaext_checkstring(L, 2);
+        const char* key = luaext_checkstring(L, 3);
+        int value = luaext_checkint(L, 4);
+        bool pretty = lua_gettop(L) >= 5 ? (lua_toboolean(L, 5) != 0) : false;
+
+        ini.reader->WriteInteger(section, key, value, pretty);
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
+    static int Lua_IniSetFloatFn(lua_State* L)
+    {
+        auto& ini = get_ini_handle(L, 1);
+        const char* section = luaext_checkstring(L, 2);
+        const char* key = luaext_checkstring(L, 3);
+        float value = static_cast<float>(luaext_checknumber(L, 4));
+        bool pretty = lua_gettop(L) >= 5 ? (lua_toboolean(L, 5) != 0) : false;
+
+        ini.reader->WriteFloat(section, key, value, pretty);
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
+    static int Lua_IniSetDoubleFn(lua_State* L)
+    {
+        auto& ini = get_ini_handle(L, 1);
+        const char* section = luaext_checkstring(L, 2);
+        const char* key = luaext_checkstring(L, 3);
+        double value = static_cast<double>(luaext_checknumber(L, 4));
+        bool pretty = lua_gettop(L) >= 5 ? (lua_toboolean(L, 5) != 0) : false;
+
+        ini.reader->WriteDouble(section, key, value, pretty);
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
+    static int Lua_IniSetBoolFn(lua_State* L)
+    {
+        auto& ini = get_ini_handle(L, 1);
+        const char* section = luaext_checkstring(L, 2);
+        const char* key = luaext_checkstring(L, 3);
+        bool value = lua_toboolean(L, 4) != 0;
+        bool pretty = lua_gettop(L) >= 5 ? (lua_toboolean(L, 5) != 0) : false;
+
+        ini.reader->WriteBoolean(section, key, value, pretty);
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
+    static int Lua_IniSetStringFn(lua_State* L)
+    {
+        auto& ini = get_ini_handle(L, 1);
+        const char* section = luaext_checkstring(L, 2);
+        const char* key = luaext_checkstring(L, 3);
+        const char* value = luaext_checkstring(L, 4);
+        bool pretty = lua_gettop(L) >= 5 ? (lua_toboolean(L, 5) != 0) : false;
+
+        ini.reader->WriteString(section, key, value, pretty);
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
+    static int Lua_IniBindMemoryFn(lua_State* L)
+    {
+        auto& ini = get_ini_handle(L, 1);
+        const char* section = luaext_checkstring(L, 2);
+        const char* key = luaext_checkstring(L, 3);
+        const char* type_name = luaext_checkstring(L, 4);
+        int memory_handle = luaext_checkint(L, 5);
+        const char* variable_name = luaext_checkstring(L, 6);
+
+        IniValueType value_type{};
+        if (_stricmp(type_name, "int") == 0 || _stricmp(type_name, "integer") == 0)
+            value_type = IniValueType::Integer;
+        else if (_stricmp(type_name, "float") == 0)
+            value_type = IniValueType::Float;
+        else if (_stricmp(type_name, "double") == 0)
+            value_type = IniValueType::Double;
+        else if (_stricmp(type_name, "bool") == 0 || _stricmp(type_name, "boolean") == 0)
+            value_type = IniValueType::Boolean;
+        else if (_stricmp(type_name, "string") == 0)
+            value_type = IniValueType::String;
+        else
+            return luaext_errorf(L, "unknown ini binding type '%s'", type_name);
+
+        upsert_ini_binding(ini, section, key, value_type, memory_handle, variable_name);
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
 
     template <typename T>
     static int PatchValue(lua_State* L)
@@ -3020,6 +3348,26 @@ namespace LuaExtended
         { "MemoryGetFieldAddress", Lua_MemoryGetFieldAddressFn },
         { "MemoryFree",            Lua_MemoryFreeFn },
 
+        { "IniOpen",               Lua_IniOpenFn },
+        { "IniClose",              Lua_IniCloseFn },
+        { "IniGetPath",            Lua_IniGetPathFn },
+        { "IniGetInt",             Lua_IniGetIntFn },
+        { "IniGetFloat",           Lua_IniGetFloatFn },
+        { "IniGetDouble",          Lua_IniGetDoubleFn },
+        { "IniGetBool",            Lua_IniGetBoolFn },
+        { "IniGetString",          Lua_IniGetStringFn },
+        { "IniSetInt",             Lua_IniSetIntFn },
+        { "IniSetFloat",           Lua_IniSetFloatFn },
+        { "IniSetDouble",          Lua_IniSetDoubleFn },
+        { "IniSetBool",            Lua_IniSetBoolFn },
+        { "IniSetString",          Lua_IniSetStringFn },
+        { "IniWriteInt",           Lua_IniSetIntFn },
+        { "IniWriteFloat",         Lua_IniSetFloatFn },
+        { "IniWriteDouble",        Lua_IniSetDoubleFn },
+        { "IniWriteBool",          Lua_IniSetBoolFn },
+        { "IniWriteString",        Lua_IniSetStringFn },
+        { "IniBindMemory",         Lua_IniBindMemoryFn },
+
         { NULL, NULL }
     };
 
@@ -3074,17 +3422,23 @@ namespace LuaExtended
             }
             });
 
-        static auto register_main = safetyhook::create_mid(0x89DA60, [](SafetyHookContext& ctx) {
-            //luaL_openlib((lua_State*)ctx.eax, lua_patching_functions, "_G");
-            luaL_openlib((lua_State*)ctx.eax, lua_patching_functions, "_G");
-
-            });
-
-        static auto register_main2 = safetyhook::create_mid(0x7F3669, [](SafetyHookContext& ctx) {
+        static auto system_main2 = safetyhook::create_mid(0xCDE44F, [](SafetyHookContext& ctx) {
             luaL_openlib((lua_State*)ctx.esi, lua_patching_functions, "_G");
 
 
             });
+
+        //static auto register_main = safetyhook::create_mid(0x89DA60, [](SafetyHookContext& ctx) {
+        //    //luaL_openlib((lua_State*)ctx.eax, lua_patching_functions, "_G");
+        //    luaL_openlib((lua_State*)ctx.eax, lua_patching_functions, "_G");
+
+        //    });
+
+        //static auto register_main2 = safetyhook::create_mid(0x7F3669, [](SafetyHookContext& ctx) {
+        //    luaL_openlib((lua_State*)ctx.esi, lua_patching_functions, "_G");
+
+
+        //    });
 
     }
 
