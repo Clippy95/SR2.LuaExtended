@@ -2078,9 +2078,33 @@ namespace LuaExtended
         return 0;
     }
 
+    template <typename T>
+    static int ReadValue(lua_State* L)
+    {
+        LuaArgs args(L);
+
+        auto address = args.get<uintptr_t>();
+        auto source = GetCurrentLuaSource(L);
+        lextprint(
+            "ReadValue called from Lua source: %s\n",
+            source.c_str()
+        );
+
+        T value = 0;
+        Read(address, value);
+        LuaReturns ret(L);
+        ret.push(value);
+        return ret.count();
+    }
+
     int Patch_bool(lua_State* L)
     {
         return PatchValue<bool>(L);
+    }
+
+    int Read_bool(lua_State* L)
+    {
+        return ReadValue<bool>(L);
     }
 
     int Patch_int8_t(lua_State* L)
@@ -2088,9 +2112,19 @@ namespace LuaExtended
         return PatchValue<int8_t>(L);
     }
 
+    int Read_int8_t(lua_State* L)
+    {
+        return ReadValue<int8_t>(L);
+    }
+
     int Patch_uint8_t(lua_State* L)
     {
         return PatchValue<uint8_t>(L);
+    }
+
+    int Read_uint8_t(lua_State* L)
+    {
+        return ReadValue<uint8_t>(L);
     }
 
     int Patch_int16_t(lua_State* L)
@@ -2098,9 +2132,19 @@ namespace LuaExtended
         return PatchValue<int16_t>(L);
     }
 
+    int Read_int16_t(lua_State* L)
+    {
+        return ReadValue<int16_t>(L);
+    }
+
     int Patch_uint16_t(lua_State* L)
     {
         return PatchValue<uint16_t>(L);
+    }
+
+    int Read_uint16_t(lua_State* L)
+    {
+        return ReadValue<uint16_t>(L);
     }
 
     int Patch_int32_t(lua_State* L)
@@ -2108,9 +2152,19 @@ namespace LuaExtended
         return PatchValue<int32_t>(L);
     }
 
+    int Read_int32_t(lua_State* L)
+    {
+        return ReadValue<int32_t>(L);
+    }
+
     int Patch_uint32_t(lua_State* L)
     {
         return PatchValue<uint32_t>(L);
+    }
+
+    int Read_uint32_t(lua_State* L)
+    {
+        return ReadValue<uint32_t>(L);
     }
 
     int Patch_int64_t(lua_State* L)
@@ -2118,9 +2172,19 @@ namespace LuaExtended
         return PatchValue<int64_t>(L);
     }
 
+    int Read_int64_t(lua_State* L)
+    {
+        return ReadValue<int64_t>(L);
+    }
+
     int Patch_uint64_t(lua_State* L)
     {
         return PatchValue<uint64_t>(L);
+    }
+
+    int Read_uint64_t(lua_State* L)
+    {
+        return ReadValue<uint64_t>(L);
     }
 
     int Patch_float(lua_State* L)
@@ -2128,9 +2192,19 @@ namespace LuaExtended
         return PatchValue<float>(L);
     }
 
+    int Read_float(lua_State* L)
+    {
+        return ReadValue<float>(L);
+    }
+
     int Patch_double(lua_State* L)
     {
         return PatchValue<double>(L);
+    }
+
+    int Read_double(lua_State* L)
+    {
+        return ReadValue<double>(L);
     }
 
     int Patch_uintptr_t(lua_State* L)
@@ -2138,14 +2212,29 @@ namespace LuaExtended
         return PatchValue<uintptr_t>(L);
     }
 
+    int Read_uintptr_t(lua_State* L)
+    {
+        return ReadValue<uintptr_t>(L);
+    }
+
     int Patch_intptr_t(lua_State* L)
     {
         return PatchValue<intptr_t>(L);
     }
 
+    int Read_intptr_t(lua_State* L)
+    {
+        return ReadValue<intptr_t>(L);
+    }
+
     int Patch_size_t(lua_State* L)
     {
         return PatchValue<size_t>(L);
+    }
+
+    int Read_size_t(lua_State* L)
+    {
+        return ReadValue<size_t>(L);
     }
 
     int Lua_CompileAssembly(lua_State* L)
@@ -2166,24 +2255,38 @@ namespace LuaExtended
     {
         { "CompileAssembly", Lua_CompileAssembly },
         { "PatchBool",   Patch_bool },
+        { "ReadBool",    Read_bool },
 
         { "PatchI8",     Patch_int8_t },
         { "PatchU8",     Patch_uint8_t },
+        { "ReadI8",      Read_int8_t },
+        { "ReadU8",      Read_uint8_t },
 
         { "PatchI16",    Patch_int16_t },
         { "PatchU16",    Patch_uint16_t },
+        { "ReadI16",     Read_int16_t },
+        { "ReadU16",     Read_uint16_t },
 
         { "PatchI32",    Patch_int32_t },
         { "PatchU32",    Patch_uint32_t },
+        { "ReadI32",     Read_int32_t },
+        { "ReadU32",     Read_uint32_t },
 
         { "PatchI64",    Patch_int64_t },
         { "PatchU64",    Patch_uint64_t },
+        { "ReadI64",     Read_int64_t },
+        { "ReadU64",     Read_uint64_t },
 
         { "PatchFloat",  Patch_float },
         { "PatchDouble", Patch_double },
+        { "ReadFloat",   Read_float },
+        { "ReadDouble",  Read_double },
 
         { "PatchPtr",    Patch_uintptr_t },
         { "PatchSize",   Patch_size_t },
+        { "ReadPtr",     Read_uintptr_t },
+        { "ReadIPtr",    Read_intptr_t },
+        { "ReadSize",    Read_size_t },
 
         { NULL, NULL }
     };
